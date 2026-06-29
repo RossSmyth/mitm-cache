@@ -88,15 +88,16 @@ enum Handler {
     Replay(PathBuf),
 }
 
-fn process_uri(uri: Uri) -> Uri {
+fn process_uri(uri: &Uri) -> Uri {
     let mut parts = uri.clone().into_parts();
+
     // strip query
-    if let Some(ref mut pq) = &mut parts.path_and_query {
+    if let Some(pq) = &mut parts.path_and_query {
         if let Ok(pq2) = pq.path().parse() {
             *pq = pq2;
         }
     }
-    if let Some(ref mut auth) = &mut parts.authority {
+    if let Some(auth) = &mut parts.authority {
         if let Some(scheme) = &parts.scheme {
             if scheme == &Scheme::HTTPS && auth.port_u16() == Some(443) {
                 if let Some(auth2) = auth
@@ -109,7 +110,7 @@ fn process_uri(uri: Uri) -> Uri {
             }
         }
     }
-    Uri::from_parts(parts).unwrap_or(uri)
+    Uri::from_parts(parts).unwrap_or(uri.clone())
 }
 
 impl HttpHandler for Handler {
@@ -140,22 +141,44 @@ impl HttpHandler for Handler {
                             "GET" | "POST" | "HEAD" => {
                                 let original_url = req.uri().clone();
                                 println!("{req:?}");
-                                let Ok(req) = decode_request(req) else {
-                                    let mut res = Response::new("not found".into());
-                                    *res.status_mut() = StatusCode::NOT_FOUND;
-                                    return res.into();
+
+                                let verb = req.method().clone();
+
+                                let req = match decode_request(req) {
+                                    Ok(req) => req,
+                                    Err(err) => {
+                                        let mut res = Response::new(
+                                            format!(
+                                                "Unable to decode the {} request at URI {}\n{:?}",
+                                                verb, original_url, err
+                                            )
+                                            .into(),
+                                        );
+                                        *res.status_mut() = StatusCode::NOT_FOUND;
+                                        return res.into();
+                                    }
                                 };
+
                                 let (info, body) = req.into_parts();
-                                let Ok(req_body) = body.collect().await.map(|x| x.to_bytes())
-                                else {
-                                    let mut res = Response::new("not found".into());
-                                    *res.status_mut() = StatusCode::NOT_FOUND;
-                                    return res.into();
+                                let req_body = match body.collect().await.map(|x| x.to_bytes()) {
+                                    Ok(req_body) => req_body,
+                                    Err(err) => {
+                                        let mut res = Response::new(
+                                            format!(
+                                                "Unable to collect the request body at {} into bytes\n{:?}",
+                                                original_url, err
+                                            ).into()
+                                        );
+                                        *res.status_mut() = StatusCode::NOT_FOUND;
+                                        return res.into();
+                                    }
                                 };
+
                                 let post_body = (info.method == "POST")
                                     .then(|| std::str::from_utf8(&req_body).ok())
                                     .flatten()
                                     .map(ToOwned::to_owned);
+
                                 let req_method = info.method.clone();
                                 let req_version = info.version;
                                 let req_headers = info.headers.clone();
@@ -169,7 +192,7 @@ impl HttpHandler for Handler {
                                     )])),
                                 );
                                 let store_body_info = req.method() != "HEAD";
-                                let url = process_uri(original_url);
+                                let url = process_uri(&original_url);
                                 if matches!(forget_regex, Some(x) if x.is_match(&url.to_string())) {
                                     forget = true;
                                 }
@@ -177,30 +200,39 @@ impl HttpHandler for Handler {
                                     all_urls.push(url.to_string());
                                 }
                                 if matches!(reject, Some(x) if x.is_match(&url.to_string())) {
-                                    let mut res = Response::new("not found".into());
+                                    let mut res = Response::new(
+                                        format!("Rejected '{}' based upon regex", original_url)
+                                            .into(),
+                                    );
                                     *res.status_mut() = StatusCode::NOT_FOUND;
                                     return res.into();
                                 }
                                 let store_full_body = req.method() == "POST"
                                     || matches!(record_text, Some(x) if x.is_match(&url.to_string()));
-                                let Ok(res) = client.request(req).await else {
-                                    let mut res = Response::new("not found".into());
-                                    *res.status_mut() = StatusCode::NOT_FOUND;
-                                    return res.into();
+                                let res = match client.request(req).await {
+                                    Ok(res) => res,
+                                    Err(err) => {
+                                        let mut res = Response::new(format!("Unable to get the content upstream at {}.\nOriginal URL: '{}'\nError: {}", url, original_url, err).into());
+                                        *res.status_mut() = StatusCode::NOT_FOUND;
+                                        return res.into();
+                                    }
                                 };
-                                let Ok(mut res) = decode_response(
+                                let mut res = match decode_response(
                                     res.map(|body| Body::from_stream(body.into_data_stream())),
-                                ) else {
-                                    let mut res = Response::new("not found".into());
-                                    *res.status_mut() = StatusCode::NOT_FOUND;
-                                    return res.into();
+                                ) {
+                                    Ok(res) => res,
+                                    Err(err) => {
+                                        let mut res = Response::new(format!("Unable to decode the upstream response at {}.\nOriginal URL: {}\nError: {}", url, original_url, err).into());
+                                        *res.status_mut() = StatusCode::NOT_FOUND;
+                                        return res.into();
+                                    }
                                 };
                                 // println!("{res:?}");
                                 if res.status().is_redirection() {
                                 if let Ok(location) = res.headers().get("Location").unwrap().to_str() {
                                     let mut pages = pages.write().await;
                                     let location = if let Ok(target) = location.parse::<Uri>() {
-                                        let target1 = process_uri(target.clone());
+                                        let target1 = process_uri(&target);
                                         if matches!(forget_redirects_from, Some(x) if x.is_match(&url.to_string()))
                                             || matches!(forget_redirects_to, Some(x) if x.is_match(&target1.to_string()))
                                         {
@@ -336,8 +368,16 @@ impl HttpHandler for Handler {
                             }
                             .into()
                             }
-                            _ => {
-                                let mut res = Response::new("not found".into());
+                            other => {
+                                let original_url = req.uri().clone();
+
+                                let mut res = Response::new(
+                                    format!(
+                                        "{} request for {} is not supported.\nRequest: \n{:?}",
+                                        other, original_url, req
+                                    )
+                                    .into(),
+                                );
                                 *res.status_mut() = StatusCode::NOT_FOUND;
                                 res.into()
                             }
@@ -348,7 +388,7 @@ impl HttpHandler for Handler {
                     "CONNECT" => req.into(),
                     "HEAD" | "GET" => {
                         let mut path = dir.clone();
-                        let url = process_uri(req.uri().clone());
+                        let url = process_uri(&req.uri());
                         if let Some(scheme) = url.scheme_str() {
                             path.push(scheme);
                         }
@@ -358,7 +398,7 @@ impl HttpHandler for Handler {
                         for comp in url.path().split('/').filter(|x| !x.is_empty()) {
                             path.push(comp);
                         }
-                        if let Ok(mut file) = tokio::fs::File::open(path).await {
+                        if let Ok(mut file) = tokio::fs::File::open(&path).await {
                             let (mut tx, rx) =
                                 mpsc::channel::<Result<hyper::body::Bytes, hudsucker::Error>>(1);
                             let body = Body::from_stream(rx);
@@ -383,13 +423,28 @@ impl HttpHandler for Handler {
                             }
                             Response::new(body).into()
                         } else {
-                            let mut res = Response::new("not found".into());
+                            let mut res = Response::new(
+                                format!(
+                                    "Unable to find '{}', was expected to be at '{}'",
+                                    url,
+                                    path.display()
+                                )
+                                .into(),
+                            );
                             *res.status_mut() = StatusCode::NOT_FOUND;
                             res.into()
                         }
                     }
-                    _ => {
-                        let mut res = Response::new("not found".into());
+                    verb => {
+                        let mut res = Response::new(
+                            format!(
+                                "{} requests are not supported\nURL: '{}'\nRequest:\n{:?}",
+                                verb,
+                                req.uri(),
+                                req
+                            )
+                            .into(),
+                        );
                         *res.status_mut() = StatusCode::NOT_FOUND;
                         res.into()
                     }
@@ -449,29 +504,38 @@ async fn main() -> Result<(), hudsucker::Error> {
         .listen
         .unwrap_or_else(|| SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1337));
 
-    let private_key_bytes = tokio::fs::read(args.ca_key.unwrap_or_else(|| "ca.key".into()))
-        .await
-        .unwrap();
-    let ca_cert_bytes = tokio::fs::read(args.ca_cert.unwrap_or_else(|| "ca.cer".into()))
-        .await
-        .unwrap();
+    let private_key_file = args.ca_key.unwrap_or_else(|| "ca.key".into());
+    let private_key_bytes = tokio::fs::read(&private_key_file).await.expect(&format!(
+        "Unable to open private key file '{}'",
+        private_key_file.display()
+    ));
+
+    let public_key_file = args.ca_cert.unwrap_or_else(|| "ca.cer".into());
+    let ca_cert_bytes = tokio::fs::read(&public_key_file).await.expect(&format!(
+        "Unable to open public key file '{}'",
+        public_key_file.display()
+    ));
+
     let private_key = PrivatePkcs8KeyDer::from(
         pemfile::pkcs8_private_keys(&mut &private_key_bytes[..])
             .next()
-            .unwrap()
-            .expect("Failed to parse private key")
+            .expect(&format!("The first item in this the file '{}' was expected to be a private x509 key. Nothing was found.", private_key_file.display()))
+            .expect(&format!("The first item in the pem file '{}' was not a valid x509 private key.", private_key_file.display()))
             .secret_pkcs8_der()
             .to_vec(),
     );
     let ca_cert = CertificateDer::from(
         pemfile::certs(&mut &ca_cert_bytes[..])
             .next()
-            .unwrap()
-            .expect("Failed to parse CA certificate")
+            .expect(&format!("The first item in this pem file '{}' was expected to be a public x509 key. Nothing was found.", public_key_file.display()))
+            .expect(&format!("The first item in the pem file '{}' was not a valid x509 public key.", public_key_file.display()))
             .to_vec(),
     );
 
-    let key_pair = KeyPair::try_from(&private_key).expect("Failed to parse private key");
+    let key_pair = KeyPair::try_from(&private_key).expect(&format!(
+        "Failed to parse private key from the pem file '{}'",
+        private_key_file.display(),
+    ));
     let ca_issuer = hudsucker::rcgen::Issuer::from_ca_cert_der(&ca_cert, key_pair)
         .expect("Failed to create x509 cert issuer with the supplied key-pair");
     let ca = RcgenAuthority::new(ca_issuer, 1_000, aws_lc_rs::default_provider());
@@ -493,7 +557,7 @@ async fn main() -> Result<(), hudsucker::Error> {
                 client: Client::builder(TokioExecutor::new()).build(
                     HttpsConnectorBuilder::new()
                         .with_native_roots()
-                        .unwrap()
+                        .expect("Unable to build http connect with native roots")
                         .https_or_http()
                         .enable_http1()
                         .build(),
@@ -524,7 +588,9 @@ async fn main() -> Result<(), hudsucker::Error> {
                     serde_json::ser::CompactFormatter,
                 ))
                 .unwrap();
-            tokio::fs::write("tmp.json", &buf).await.unwrap();
+            tokio::fs::write("tmp.json", &buf)
+                .await
+                .expect(&format!("Unable to write to file tmp.json"));
         }
     });
     let ret = proxy.start().await;
@@ -536,9 +602,12 @@ async fn main() -> Result<(), hudsucker::Error> {
             &mut buf,
             serde_json::ser::CompactFormatter,
         ))
-        .unwrap();
-    tokio::fs::write(args.out.unwrap_or("out.json".into()), &buf)
-        .await
-        .unwrap();
+        .expect(&format!("Unable to serialize the data to json:\n{:?}", buf));
+
+    let output = args.out.unwrap_or("out.json".into());
+    tokio::fs::write(&output, &buf).await.expect(&format!(
+        "Unable to write output to file '{}'",
+        output.display()
+    ));
     ret
 }
