@@ -2,23 +2,26 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use http_body_util::BodyExt;
 use hudsucker::{
+    Body, HttpContext, HttpHandler, Proxy, RequestOrResponse,
     certificate_authority::RcgenAuthority,
     decode_request, decode_response,
     futures::channel::mpsc,
     hyper::{Request, Response},
     rcgen::KeyPair,
-    rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer},
+    rustls::{
+        crypto::aws_lc_rs,
+        pki_types::{CertificateDer, PrivatePkcs8KeyDer},
+    },
     tokio_tungstenite::tungstenite::http::uri::Scheme,
-    Body, HttpContext, HttpHandler, Proxy, RequestOrResponse,
 };
 use hyper::{StatusCode, Uri};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
+    client::legacy::{Client, connect::HttpConnector},
     rt::TokioExecutor,
 };
 use rustls_pemfile as pemfile;
-use serde::{ser::SerializeMap, Serialize};
+use serde::{Serialize, ser::SerializeMap};
 use sha2::Digest;
 use std::{
     collections::BTreeMap,
@@ -469,18 +472,15 @@ async fn main() -> Result<(), hudsucker::Error> {
     );
 
     let key_pair = KeyPair::try_from(&private_key).expect("Failed to parse private key");
-    let ca_cert_params = hudsucker::rcgen::CertificateParams::from_ca_cert_der(&ca_cert)
-        .expect("Failed to parse CA certificate");
-    let ca_cert = ca_cert_params
-        .self_signed(&key_pair)
-        .expect("Failed to generate CA certificate");
-    let ca = RcgenAuthority::new(key_pair, ca_cert, 1_000);
+    let ca_issuer = hudsucker::rcgen::Issuer::from_ca_cert_der(&ca_cert, key_pair)
+        .expect("Failed to create x509 cert issuer with the supplied key-pair");
+    let ca = RcgenAuthority::new(ca_issuer, 1_000, aws_lc_rs::default_provider());
 
     let pages = Arc::new(RwLock::new(Pages(BTreeMap::default())));
     let proxy = Proxy::builder()
         .with_addr(addr)
-        .with_rustls_client()
         .with_ca(ca)
+        .with_rustls_connector(aws_lc_rs::default_provider())
         .with_http_handler(match args.cmd {
             Command::Replay { dir } => Handler::Replay(dir),
             Command::Record {
@@ -507,7 +507,8 @@ async fn main() -> Result<(), hudsucker::Error> {
             },
         })
         .with_graceful_shutdown(shutdown_signal())
-        .build();
+        .build()
+        .expect("Failed to build proxy object.");
 
     let pages1 = pages.clone();
     tokio::spawn(async move {
