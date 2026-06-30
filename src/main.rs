@@ -194,37 +194,36 @@ async fn main() -> Result<(), hudsucker::Error> {
 
         TcpListener::bind(addr)
             .await
-            .unwrap_or_else(|err| panic!("Unable to bind address '{}' on host.\n{err:?}", addr))
+            .unwrap_or_else(|err| panic!("Unable to bind address '{}' on host.\n\n{err:?}", addr))
     };
     let used_addr = listener.local_addr().unwrap();
     println!("Listening on: '{}'", used_addr);
-    println!(
-        "To use, set the `http_proxy` and `https_proxy` environment variables to the bound address"
-    );
 
     let private_key_file = args.ca_key.unwrap_or_else(|| "ca.key".into());
     let private_key_bytes = tokio::fs::read(&private_key_file)
         .await
-        .unwrap_or_else(|_| {
+        .unwrap_or_else(|err| {
             panic!(
-                "Unable to open private key file '{}'",
+                "Unable to open private key file '{}'\n\n{err:?}",
                 private_key_file.display()
             )
         });
 
     let public_key_file = args.ca_cert.unwrap_or_else(|| "ca.cer".into());
-    let ca_cert_bytes = tokio::fs::read(&public_key_file).await.unwrap_or_else(|_| {
-        panic!(
-            "Unable to open public key file '{}'",
-            public_key_file.display()
-        )
-    });
+    let ca_cert_bytes = tokio::fs::read(&public_key_file)
+        .await
+        .unwrap_or_else(|err| {
+            panic!(
+                "Unable to open public key file '{}'\n\n{err:?}",
+                public_key_file.display()
+            )
+        });
 
     let private_key = PrivatePkcs8KeyDer::from(
         pemfile::pkcs8_private_keys(&mut &private_key_bytes[..])
             .next()
             .unwrap_or_else(|| panic!("The first item in this the file '{}' was expected to be a private x509 key. Nothing was found.", private_key_file.display()))
-            .unwrap_or_else(|_| panic!("The first item in the pem file '{}' was not a valid x509 private key.", private_key_file.display()))
+            .unwrap_or_else(|err| panic!("The first item in the pem file '{}' was not a valid x509 private key.\n\n{err:?}", private_key_file.display()))
             .secret_pkcs8_der()
             .to_vec(),
     );
@@ -232,13 +231,13 @@ async fn main() -> Result<(), hudsucker::Error> {
         pemfile::certs(&mut &ca_cert_bytes[..])
             .next()
             .unwrap_or_else(|| panic!("The first item in this pem file '{}' was expected to be a public x509 key. Nothing was found.", public_key_file.display()))
-            .unwrap_or_else(|_| panic!("The first item in the pem file '{}' was not a valid x509 public key.", public_key_file.display()))
+            .unwrap_or_else(|err| panic!("The first item in the pem file '{}' was not a valid x509 public key.\n\n{err:?}", public_key_file.display()))
             .to_vec(),
     );
 
-    let key_pair = KeyPair::try_from(&private_key).unwrap_or_else(|_| {
+    let key_pair = KeyPair::try_from(&private_key).unwrap_or_else(|err| {
         panic!(
-            "Failed to parse private key from the pem file '{}'",
+            "Failed to parse private key from the pem file '{}'\n\n{err:?}",
             private_key_file.display()
         )
     });
@@ -304,7 +303,7 @@ async fn main() -> Result<(), hudsucker::Error> {
 
     println!("Usage:");
     println!(
-        "https_proxy='{0:}' http_proxy='{0:}' SSL_CERT_FILE='{1:}' YOUR_COMMAND",
+        "  https_proxy='{0:}' http_proxy='{0:}' SSL_CERT_FILE='{1:}' YOUR_COMMAND",
         used_addr,
         public_key_file.display()
     );
@@ -317,11 +316,14 @@ async fn main() -> Result<(), hudsucker::Error> {
             &mut buf,
             serde_json::ser::CompactFormatter,
         ))
-        .unwrap_or_else(|_| panic!("Unable to serialize the data to json:\n{:?}", buf));
+        .unwrap_or_else(|err| panic!("Unable to serialize the data to json:\n{buf:?}\n\n{err:?}",));
 
     let output = args.out.unwrap_or("out.json".into());
-    tokio::fs::write(&output, &buf)
-        .await
-        .unwrap_or_else(|_| panic!("Unable to write output to file '{}'", output.display()));
+    tokio::fs::write(&output, &buf).await.unwrap_or_else(|err| {
+        panic!(
+            "Unable to write output to file '{}'\n\n{err:?}",
+            output.display()
+        )
+    });
     ret
 }
