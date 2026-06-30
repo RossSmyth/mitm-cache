@@ -20,7 +20,6 @@ use rustls_pemfile as pemfile;
 use serde::{Serialize, ser::SerializeMap};
 use std::{
     collections::BTreeMap,
-    future::Future,
     net::{Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::Arc,
@@ -112,37 +111,34 @@ pub fn process_uri(uri: &Uri) -> Uri {
 }
 
 impl HttpHandler for Handler {
-    #[allow(clippy::manual_async_fn)]
-    fn handle_request(
+    async fn handle_request(
         &mut self,
         _ctx: &HttpContext,
         req: Request<Body>,
-    ) -> impl Future<Output = RequestOrResponse> + Send {
-        async move {
-            match self {
-                Self::Record {
+    ) -> RequestOrResponse {
+        match self {
+            Self::Record {
+                client,
+                pages,
+                forget: forget_regex,
+                forget_redirects_to,
+                forget_redirects_from,
+                record_text,
+                reject,
+            } => {
+                record::record(
                     client,
                     pages,
-                    forget: forget_regex,
-                    forget_redirects_to,
-                    forget_redirects_from,
-                    record_text,
-                    reject,
-                } => {
-                    record::record(
-                        client,
-                        pages,
-                        req,
-                        forget_regex.as_ref(),
-                        forget_redirects_to.as_ref(),
-                        forget_redirects_from.as_ref(),
-                        record_text.as_ref(),
-                        reject.as_ref(),
-                    )
-                    .await
-                }
-                Self::Replay(dir) => replay::replay(req, dir).await,
+                    req,
+                    forget_regex.as_ref(),
+                    forget_redirects_to.as_ref(),
+                    forget_redirects_from.as_ref(),
+                    record_text.as_ref(),
+                    reject.as_ref(),
+                )
+                .await
             }
+            Self::Replay(dir) => replay::replay(req, dir).await,
         }
     }
 }
