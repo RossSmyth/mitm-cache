@@ -13,6 +13,7 @@ mkShell {
   ];
 
   packages = with pkgs; [
+    clippy
     rust-analyzer
     rustfmt
   ];
