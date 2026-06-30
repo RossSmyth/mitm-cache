@@ -1,15 +1,15 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use hudsucker::{Body, RequestOrResponse, futures::channel::mpsc};
 use hyper::{Request, Response, StatusCode};
 use tokio::io::AsyncReadExt;
 
-pub async fn replay(req: Request<Body>, dir: &mut PathBuf) -> RequestOrResponse {
+pub async fn replay(req: Request<Body>, dir: &Path) -> RequestOrResponse {
     match req.method().as_str() {
         "CONNECT" => req.into(),
         "HEAD" | "GET" => {
-            let mut path = dir.clone();
-            let url = crate::process_uri(&req.uri());
+            let mut path = dir.to_owned();
+            let url = crate::process_uri(req.uri());
             if let Some(scheme) = url.scheme_str() {
                 path.push(scheme);
             }

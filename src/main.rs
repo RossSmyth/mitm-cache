@@ -74,7 +74,7 @@ impl Serialize for Pages {
 #[derive(Clone)]
 enum Handler {
     Record {
-        client: Client<HttpsConnector<HttpConnector>, Body>,
+        client: Box<Client<HttpsConnector<HttpConnector>, Body>>,
         pages: Arc<RwLock<Pages>>,
         forget: Option<regex::Regex>,
         forget_redirects_from: Option<regex::Regex>,
@@ -89,23 +89,21 @@ pub fn process_uri(uri: &Uri) -> Uri {
     let mut parts = uri.clone().into_parts();
 
     // strip query
-    if let Some(pq) = &mut parts.path_and_query {
-        if let Ok(pq2) = pq.path().parse() {
-            *pq = pq2;
-        }
+    if let Some(pq) = &mut parts.path_and_query
+        && let Ok(pq2) = pq.path().parse()
+    {
+        *pq = pq2;
     }
-    if let Some(auth) = &mut parts.authority {
-        if let Some(scheme) = &parts.scheme {
-            if scheme == &Scheme::HTTPS && auth.port_u16() == Some(443) {
-                if let Some(auth2) = auth
-                    .as_str()
-                    .strip_suffix(":443")
-                    .and_then(|x| x.parse().ok())
-                {
-                    *auth = auth2;
-                }
-            }
-        }
+    if let Some(auth) = &mut parts.authority
+        && let Some(scheme) = &parts.scheme
+        && scheme == &Scheme::HTTPS
+        && auth.port_u16() == Some(443)
+        && let Some(auth2) = auth
+            .as_str()
+            .strip_suffix(":443")
+            .and_then(|x| x.parse().ok())
+    {
+        *auth = auth2;
     }
     Uri::from_parts(parts).unwrap_or(uri.clone())
 }
@@ -194,37 +192,45 @@ async fn main() -> Result<(), hudsucker::Error> {
         .unwrap_or_else(|| SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1337));
 
     let private_key_file = args.ca_key.unwrap_or_else(|| "ca.key".into());
-    let private_key_bytes = tokio::fs::read(&private_key_file).await.expect(&format!(
-        "Unable to open private key file '{}'",
-        private_key_file.display()
-    ));
+    let private_key_bytes = tokio::fs::read(&private_key_file)
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "Unable to open private key file '{}'",
+                private_key_file.display()
+            )
+        });
 
     let public_key_file = args.ca_cert.unwrap_or_else(|| "ca.cer".into());
-    let ca_cert_bytes = tokio::fs::read(&public_key_file).await.expect(&format!(
-        "Unable to open public key file '{}'",
-        public_key_file.display()
-    ));
+    let ca_cert_bytes = tokio::fs::read(&public_key_file).await.unwrap_or_else(|_| {
+        panic!(
+            "Unable to open public key file '{}'",
+            public_key_file.display()
+        )
+    });
 
     let private_key = PrivatePkcs8KeyDer::from(
         pemfile::pkcs8_private_keys(&mut &private_key_bytes[..])
             .next()
-            .expect(&format!("The first item in this the file '{}' was expected to be a private x509 key. Nothing was found.", private_key_file.display()))
-            .expect(&format!("The first item in the pem file '{}' was not a valid x509 private key.", private_key_file.display()))
+            .unwrap_or_else(|| panic!("The first item in this the file '{}' was expected to be a private x509 key. Nothing was found.", private_key_file.display()))
+            .unwrap_or_else(|_| panic!("The first item in the pem file '{}' was not a valid x509 private key.", private_key_file.display()))
             .secret_pkcs8_der()
             .to_vec(),
     );
     let ca_cert = CertificateDer::from(
         pemfile::certs(&mut &ca_cert_bytes[..])
             .next()
-            .expect(&format!("The first item in this pem file '{}' was expected to be a public x509 key. Nothing was found.", public_key_file.display()))
-            .expect(&format!("The first item in the pem file '{}' was not a valid x509 public key.", public_key_file.display()))
+            .unwrap_or_else(|| panic!("The first item in this pem file '{}' was expected to be a public x509 key. Nothing was found.", public_key_file.display()))
+            .unwrap_or_else(|_| panic!("The first item in the pem file '{}' was not a valid x509 public key.", public_key_file.display()))
             .to_vec(),
     );
 
-    let key_pair = KeyPair::try_from(&private_key).expect(&format!(
-        "Failed to parse private key from the pem file '{}'",
-        private_key_file.display(),
-    ));
+    let key_pair = KeyPair::try_from(&private_key).unwrap_or_else(|_| {
+        panic!(
+            "Failed to parse private key from the pem file '{}'",
+            private_key_file.display()
+        )
+    });
     let ca_issuer = hudsucker::rcgen::Issuer::from_ca_cert_der(&ca_cert, key_pair)
         .expect("Failed to create x509 cert issuer with the supplied key-pair");
     let ca = RcgenAuthority::new(ca_issuer, 1_000, aws_lc_rs::default_provider());
@@ -243,13 +249,15 @@ async fn main() -> Result<(), hudsucker::Error> {
                 record_text,
                 reject,
             } => Handler::Record {
-                client: Client::builder(TokioExecutor::new()).build(
-                    HttpsConnectorBuilder::new()
-                        .with_native_roots()
-                        .expect("Unable to build http connect with native roots")
-                        .https_or_http()
-                        .enable_http1()
-                        .build(),
+                client: Box::new(
+                    Client::builder(TokioExecutor::new()).build(
+                        HttpsConnectorBuilder::new()
+                            .with_native_roots()
+                            .expect("Unable to build http connect with native roots")
+                            .https_or_http()
+                            .enable_http1()
+                            .build(),
+                    ),
                 ),
                 pages: pages.clone(),
                 forget,
@@ -279,7 +287,7 @@ async fn main() -> Result<(), hudsucker::Error> {
                 .unwrap();
             tokio::fs::write("tmp.json", &buf)
                 .await
-                .expect(&format!("Unable to write to file tmp.json"));
+                .expect("Unable to write to file tmp.json");
         }
     });
     let ret = proxy.start().await;
@@ -291,12 +299,11 @@ async fn main() -> Result<(), hudsucker::Error> {
             &mut buf,
             serde_json::ser::CompactFormatter,
         ))
-        .expect(&format!("Unable to serialize the data to json:\n{:?}", buf));
+        .unwrap_or_else(|_| panic!("Unable to serialize the data to json:\n{:?}", buf));
 
     let output = args.out.unwrap_or("out.json".into());
-    tokio::fs::write(&output, &buf).await.expect(&format!(
-        "Unable to write output to file '{}'",
-        output.display()
-    ));
+    tokio::fs::write(&output, &buf)
+        .await
+        .unwrap_or_else(|_| panic!("Unable to write output to file '{}'", output.display()));
     ret
 }

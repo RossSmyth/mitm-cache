@@ -140,15 +140,14 @@ pub async fn record(
                                             } else {
                                                 let target0 = target.clone();
                                                 let mut parts = target.into_parts();
-                                                if let Some(auth) = &mut parts.authority {
-                                                    if let Ok(x) = format!("{}:{}", auth.host(), if matches!(&parts.scheme, Some(x) if *x == Scheme::HTTP) {
+                                                if let Some(auth) = &mut parts.authority
+                                                    && let Ok(x) = format!("{}:{}", auth.host(), if matches!(&parts.scheme, Some(x) if *x == Scheme::HTTP) {
                                                         80
                                                     } else {
                                                         443
                                                     }).parse() {
                                                         *auth = x;
                                                     }
-                                                }
                                                 Uri::from_parts(parts).unwrap_or(target0)
                                             };
                                             req1 = Some(req);
