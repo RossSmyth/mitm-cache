@@ -1,3 +1,4 @@
+use cap_std::fs::{Dir, File};
 use clap::{Parser, Subcommand};
 use hudsucker::{
     Body, HttpContext, HttpHandler, Proxy, RequestOrResponse,
@@ -21,7 +22,7 @@ use serde::{Serialize, ser::SerializeMap};
 use std::{
     collections::BTreeMap,
     net::{Ipv4Addr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::{net::TcpListener, sync::RwLock};
@@ -82,7 +83,7 @@ enum Handler {
         record_text: Option<regex::Regex>,
         reject: Option<regex::Regex>,
     },
-    Replay(PathBuf),
+    Replay(&'static Dir),
 }
 
 pub fn process_uri(uri: &Uri) -> Uri {
@@ -106,6 +107,25 @@ pub fn process_uri(uri: &Uri) -> Uri {
         *auth = auth2;
     }
     Uri::from_parts(parts).unwrap_or(uri.clone())
+}
+
+async fn open_dir(dir: &Path) -> cap_std::fs::Dir {
+    let base = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let auth = cap_std::ambient_authority();
+
+        cap_std::fs::Dir::open_ambient_dir(base, auth)
+    })
+    .await
+    .unwrap_or_else(|err| panic!("Failed to join tokio task\n\n{err:?}"))
+    .unwrap_or_else(|err| panic!("Failed to open directory: {}\n\n{err:?}", dir.display()))
+}
+
+pub async fn open_file(base: &'static Dir, path: &Path) -> std::io::Result<File> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || base.open(path))
+        .await
+        .unwrap_or_else(|err| panic!("Failed to join tokio task\n\n{err:?}"))
 }
 
 impl HttpHandler for Handler {
@@ -161,7 +181,7 @@ enum Command {
         forget_redirects_to: Option<regex::Regex>,
     },
     Replay {
-        /// Path to the cache fetched using fetch.nix
+        /// Path to the cache root fetched using fetch.nix
         dir: PathBuf,
     },
 }
@@ -246,12 +266,22 @@ async fn main() -> Result<(), hudsucker::Error> {
     let ca = RcgenAuthority::new(ca_issuer, 1_000, aws_lc_rs::default_provider());
 
     let pages = Arc::new(RwLock::new(Pages(BTreeMap::default())));
+
     let proxy = Proxy::builder()
         .with_listener(listener)
         .with_ca(ca)
         .with_rustls_connector(aws_lc_rs::default_provider())
         .with_http_handler(match args.cmd {
-            Command::Replay { dir } => Handler::Replay(dir),
+            Command::Replay { dir } => {
+                // :3
+                // So:
+                // cap_std hates cloning,
+                // The handler requires cloning
+                // Then some other things are annoying to if you impl Clone yourself.
+                // So the easiest is to just leak a box. This is allocated once so who cares.
+                let base_dir: &'static Dir = Box::<_>::leak(Box::new(open_dir(&dir).await));
+                Handler::Replay(&base_dir)
+            }
             Command::Record {
                 forget,
                 forget_redirects_to,

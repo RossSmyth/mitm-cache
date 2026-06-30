@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
 
+use cap_std::fs::Dir;
 use hudsucker::{Body, RequestOrResponse, futures::channel::mpsc};
 use hyper::{Request, Response, StatusCode, Uri};
 use tokio::io::AsyncReadExt;
 
-fn get_cache_path(base: &Path, url: &Uri) -> PathBuf {
-    // Base path that all cached files are children to
-    let mut path = base.to_owned();
+// Relative to some base
+fn get_cache_path(url: &Uri) -> PathBuf {
+    let mut path = PathBuf::new();
 
     // To a pathy format
     let url = crate::process_uri(url);
@@ -24,7 +25,7 @@ fn get_cache_path(base: &Path, url: &Uri) -> PathBuf {
     path
 }
 
-pub async fn replay(req: Request<Body>, dir: &Path) -> RequestOrResponse {
+pub async fn replay(req: Request<Body>, dir: &'static Dir) -> RequestOrResponse {
     match req.method().as_str() {
         // Connect = "Please proxy to this server"
         // Since we are the proxy, and we are an offline
@@ -32,7 +33,7 @@ pub async fn replay(req: Request<Body>, dir: &Path) -> RequestOrResponse {
         "CONNECT" => Response::new("Offline replay".into()).into(),
         "HEAD" => {
             // The probable path of the request if cached
-            let path = get_cache_path(dir, req.uri());
+            let path = get_cache_path(req.uri());
 
             // The path should exist with the current impl, but we don't actually
             // want to open as it's empty.
@@ -56,15 +57,18 @@ pub async fn replay(req: Request<Body>, dir: &Path) -> RequestOrResponse {
         }
         "GET" => {
             // The probable path of the request if cached
-            let path = get_cache_path(dir, req.uri());
+            let path = get_cache_path(req.uri());
 
             // Next, try to stream the file back to the client
-            if let Ok(mut file) = tokio::fs::File::open(&path).await {
+            if let Ok(file) = crate::open_file(dir, &path).await {
                 // Create a channel for streaming
                 let (mut tx, rx) = mpsc::channel::<Result<hyper::body::Bytes, hudsucker::Error>>(1);
 
                 // Create a body to stream back
                 let body = Body::from_stream(rx);
+
+                // Opened with cap-std, so conversion is fine
+                let mut file = tokio::fs::File::from_std(file.into_std());
 
                 // Spawn a task for reading the file to the stream
                 tokio::spawn(async move {
