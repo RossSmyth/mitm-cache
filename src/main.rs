@@ -24,7 +24,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use tokio::sync::RwLock;
+use tokio::{net::TcpListener, sync::RwLock};
 
 mod record;
 mod replay;
@@ -187,9 +187,19 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), hudsucker::Error> {
     let args = Args::parse();
-    let addr = args
-        .listen
-        .unwrap_or_else(|| SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1337));
+    let listener = {
+        let addr = args
+            .listen
+            .unwrap_or_else(|| SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0));
+
+        TcpListener::bind(addr)
+            .await
+            .unwrap_or_else(|err| panic!("Unable to bind address '{}' on host.\n{err:?}", addr))
+    };
+    println!("Listening on: '{}'", listener.local_addr().unwrap());
+    println!(
+        "To use, set the `http_proxy` and `https_proxy` environment variables to the bound address"
+    );
 
     let private_key_file = args.ca_key.unwrap_or_else(|| "ca.key".into());
     let private_key_bytes = tokio::fs::read(&private_key_file)
@@ -237,7 +247,7 @@ async fn main() -> Result<(), hudsucker::Error> {
 
     let pages = Arc::new(RwLock::new(Pages(BTreeMap::default())));
     let proxy = Proxy::builder()
-        .with_addr(addr)
+        .with_listener(listener)
         .with_ca(ca)
         .with_rustls_connector(aws_lc_rs::default_provider())
         .with_http_handler(match args.cmd {
