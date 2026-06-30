@@ -196,7 +196,8 @@ async fn main() -> Result<(), hudsucker::Error> {
             .await
             .unwrap_or_else(|err| panic!("Unable to bind address '{}' on host.\n{err:?}", addr))
     };
-    println!("Listening on: '{}'", listener.local_addr().unwrap());
+    let used_addr = listener.local_addr().unwrap();
+    println!("Listening on: '{}'", used_addr);
     println!(
         "To use, set the `http_proxy` and `https_proxy` environment variables to the bound address"
     );
@@ -300,6 +301,13 @@ async fn main() -> Result<(), hudsucker::Error> {
                 .expect("Unable to write to file tmp.json");
         }
     });
+
+    println!("Usage:");
+    println!(
+        "https_proxy='{0:}' http_proxy='{0:}' SSL_CERT_FILE='{1:}' YOUR_COMMAND",
+        used_addr,
+        public_key_file.display()
+    );
     let ret = proxy.start().await;
 
     let pages = pages1.read().await;
